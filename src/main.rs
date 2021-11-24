@@ -8,7 +8,9 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::Duration;
 use crate::epoll::ffi::{close, epoll_create1, epoll_ctl, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_wait, EPOLLET, EPOLLHUP, EPOLLIN, EPOLLONESHOT, EPOLLOUT, EPOLLRDHUP, Event, F_GETFD, F_SETFD, F_SETFL, fcntl, O_NONBLOCK, READ_FLAGS, WRITE_FLAGS, read};
+use crate::handler::handler::{RequestContext, TRequestContext};
 
+mod handler;
 mod epoll;
 
 static RESPONSE: &str = "HTTP/1.1 200
@@ -42,7 +44,7 @@ fn main() -> io::Result<()> {
     let mut events: Vec<Event> = Vec::with_capacity(1024);
 
     let mut sockets: HashMap<i32, TcpStream> = HashMap::new();
-    let mut requests: HashMap<i32, Vec<u8>> = HashMap::new();
+    let mut requests: HashMap<i32, RequestContext> = HashMap::new();
 
     unsafe { epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &mut Event { events: (EPOLLIN | EPOLLOUT | EPOLLET) as u32, u64: token as u64 }) };
 
@@ -64,8 +66,8 @@ fn main() -> io::Result<()> {
                             token += 1;
                             println!("IN HERE");
                             unsafe { epoll_ctl(epoll_fd, EPOLL_CTL_ADD, stream_fd, &mut Event { events: (EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLHUP) as u32, u64: token as u64 }) };
+                            requests.insert(token, RequestContext::new(token, stream.try_clone().unwrap(), Vec::with_capacity(192)));
                             sockets.insert(token, stream);
-                            requests.insert(token, Vec::with_capacity(192));
                         }
                         Err(e) => {
                             println!("ACCEPT ERROR: {:?}", e);
@@ -89,9 +91,9 @@ fn main() -> io::Result<()> {
                                             sockets.remove(&(event.u64 as i32)).unwrap();
                                             break;
                                         }
-                                        
+
                                         Ok(n) => {
-                                            let req = requests.get_mut(&((event.u64 as i32) as i32)).unwrap();
+                                            let req = requests.get_mut(&((event.u64 as i32) as i32)).unwrap().mut_buffer();
                                             for b in &buffer[0..n] {
                                                 req.push(*b);
                                             }
@@ -122,7 +124,10 @@ fn main() -> io::Result<()> {
                             if v as i32 & EPOLLOUT == EPOLLOUT {
                                 println!("WRITE");
                                 let socket = sockets.get_mut(&(event.u64 as i32)).unwrap();
-                                requests.get_mut(&(event.u64 as i32)).unwrap().clear();
+                                let request = requests.get_mut(&(event.u64 as i32)).unwrap();
+                                let request_buffer = request.mut_buffer();
+                                println!("Buffer {:?}", request_buffer);
+                                request_buffer.clear();
                                 socket.write(RESPONSE.as_bytes()).unwrap();
                                 unsafe { epoll_ctl(epoll_fd, EPOLL_CTL_MOD, socket.as_raw_fd(), &mut Event { events: (EPOLLIN | EPOLLET) as u32, u64: event.u64 }) };
                             }
